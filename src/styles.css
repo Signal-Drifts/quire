@@ -558,9 +558,9 @@ th {
   z-index: 1;
   height: 38px;
   padding: 0 12px;
-  border-bottom: 1px solid #b9d9e7;
-  color: #071311;
-  background: #e8f5fb;
+  border-bottom: 1px solid #c2410c;
+  color: #ffffff;
+  background: #ea580c;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -873,9 +873,9 @@ tbody tr.drag-over td {
 }
 
 .action-bar .button:disabled {
-  border-color: #b9d9e7;
-  color: #3f4f4c;
-  background: #e8f5fb;
+  border-color: #f4a97f;
+  color: #ffffff;
+  background: #f4a97f;
   box-shadow: none;
 }
 
@@ -883,16 +883,16 @@ tbody tr.drag-over td {
 .action-bar .button.primary,
 .action-bar .button.secondary {
   height: 28.8px;
-  border-color: #b9d9e7;
-  color: var(--ink);
-  background: #e8f5fb;
+  border-color: #ea580c;
+  color: #ffffff;
+  background: #ea580c;
   box-shadow: none;
 }
 
 .action-bar .button:hover:not(:disabled) {
-  border-color: #83bdd8;
-  color: #102a26;
-  background: #d6edf7;
+  border-color: #c2410c;
+  color: #ffffff;
+  background: #c2410c;
 }
 
 .tooltip-anchor {
