@@ -36,7 +36,7 @@
             </select>
           </label>
 
-          <label class="field output-field">
+          <label id="output-field" class="field output-field">
             <span>Output Type</span>
             <select id="output-type" required disabled>
               <option value="" selected disabled>Choose a Type</option>
@@ -107,7 +107,7 @@
             </span>
           </div>
           <div class="action-group">
-            <button id="convert" class="button primary" type="button" disabled>Convert</button>
+            <button id="convert" class="button primary" type="button" disabled>Apply</button>
             <button id="save" class="button primary" type="button" disabled>Save</button>
           </div>
         </footer>
@@ -124,9 +124,10 @@
           </div>
         </div>
 
-        <div id="save-dialog" class="notice save-dialog" role="dialog" aria-modal="false" aria-labelledby="save-title" hidden>
+        <div id="save-modal-backdrop" class="save-modal-backdrop" aria-hidden="true" hidden></div>
+        <div id="save-dialog" class="notice save-dialog" role="dialog" aria-modal="true" aria-labelledby="save-title" hidden>
           <div class="notice-handle">
-            <strong id="save-title">Save Converted Files</strong>
+            <strong id="save-title">Save Output Files</strong>
             <button id="dismiss-save" type="button" aria-label="Close Save">×</button>
           </div>
           <div class="save-copy">

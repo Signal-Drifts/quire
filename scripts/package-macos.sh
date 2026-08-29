@@ -101,7 +101,7 @@ set -euo pipefail
 resources="\$(cd "\$(dirname "\$0")/.." && pwd)"
 profile="\$(mktemp -d "\${TMPDIR:-/tmp}/quire-soffice.XXXXXXXX")"
 trap 'rm -rf -- "\${profile:?}"' EXIT
-exec "\$resources/libreoffice/$libreoffice_name/Contents/MacOS/soffice" "-env:UserInstallation=file://\$profile" "\$@"
+"\$resources/libreoffice/$libreoffice_name/Contents/MacOS/soffice" "-env:UserInstallation=file://\$profile" "\$@"
 WRAPPER
 chmod +x "$bin_dir/qpdf" "$bin_dir/pandoc" "$bin_dir/tesseract" "$bin_dir/soffice"
 

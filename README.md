@@ -4,7 +4,7 @@ Everything PDF & Free.
 
 Website: [https://hgus107.github.io/Filish/?app=quire](https://hgus107.github.io/Filish/?app=quire)
 
-Current release: **v0.1.0**
+Current release: **v0.1.1**
 
 Create, extract, and manage PDFs on your laptop. No uploads, page limits, or watermarks.
 
@@ -41,10 +41,10 @@ Quire is a plain interface over those tools, running locally, with nothing to si
 
 Download the signed, notarized Apple Silicon installer from the [latest release](https://github.com/hgus107/quire/releases/latest).
 
-1. Choose a function and output type.
+1. Choose a function and, when shown, an output type.
 2. Import files, or drag files or a folder onto the window.
 3. Reorder sources when creating one combined PDF.
-4. Press Convert, review the result status, then press Save.
+4. Press Apply, review the result status, then press Save.
 
 Originals are never modified or deleted.
 

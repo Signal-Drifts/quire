@@ -17,9 +17,10 @@ export type ImportCandidate = {
 export type RotatePageMode = "all" | "single" | "range";
 
 export function allowedImportExtensions(task: TaskFunction | null): string[] {
-  if (!task || task === "to-pdf") {
+  if (!task) {
     return ["doc", "docx", "html", "htm", "md", "markdown", "odt", "pdf", "rtf", "txt"];
   }
+  if (task === "to-pdf") return ["doc", "docx", "html", "htm", "md", "markdown", "odt", "rtf", "txt"];
   return ["pdf"];
 }
 

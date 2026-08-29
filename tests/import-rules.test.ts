@@ -34,11 +34,11 @@ test("Import Files ignores task options and disables only during import or an op
   assert.equal(importIsReady({ task: "merge", outputType: "merged", pageRanges: "", rotatePages: "", pickerOpen: false, importing: true }), false);
 });
 
-test("Import does not require Function options while Convert validation remains separate", () => {
+test("Import does not require Function options while Apply validation remains separate", () => {
   const source = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
   const addPaths = source.match(/async function addPaths\(paths: string\[\]\): Promise<void> \{[\s\S]*?\n\}/)?.[0] ?? "";
   assert.doesNotMatch(addPaths, /outputSelect|validDetails|Complete the required options/);
-  assert.match(source, /convertButton\.disabled = busy[\s\S]*?!functionChosen \|\| queue\.length === 0/);
+  assert.match(source, /convertButton\.disabled = saveDialogOpen[\s\S]*?!selectedFunction\(\) \|\| queue\.length === 0/);
   assert.match(source, /showNotice\("Please Select an Output Type\."\)/);
 });
 
@@ -84,10 +84,14 @@ test("Rotate page modes validate all pages, a single page, and one page range", 
 test("Rotate controls expose the approved dropdown and conditional entry fields", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const source = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
   assert.match(html, /<select id="rotate-pages-mode"[^>]*>[\s\S]*?<option value="all" selected>All Pages<\/option>/);
   assert.match(html, /<option value="single">Single Page<\/option>/);
   assert.match(html, /<option value="range">Page Range<\/option>/);
   assert.match(html, /id="rotate-pages-static">All Pages/);
+  assert.match(styles, /\.rotate-pages-control:has\(#rotate-pages\[hidden\]\) #rotate-pages-mode \{[\s\S]*?left: 0;[\s\S]*?width: 100%;/);
+  assert.match(styles, /\.rotate-pages-arrow \{[\s\S]*?left: 17px;/);
+  assert.match(source, /rotatePagesControl\.addEventListener\("click"[\s\S]*?rotatePagesMode\.showPicker\(\)/);
   assert.match(html, /id="rotate-pages-prompt" hidden>Enter Page Number:/);
   assert.match(html, /id="rotate-pages"/);
   assert.doesNotMatch(html, /rotate-pages-value-field/);
@@ -97,7 +101,7 @@ test("Rotate controls expose the approved dropdown and conditional entry fields"
 
 test("file filters match each task", () => {
   assert.deepEqual(allowedImportExtensions(null), ["doc", "docx", "html", "htm", "md", "markdown", "odt", "pdf", "rtf", "txt"]);
-  assert.deepEqual(allowedImportExtensions("to-pdf"), ["doc", "docx", "html", "htm", "md", "markdown", "odt", "pdf", "rtf", "txt"]);
+  assert.deepEqual(allowedImportExtensions("to-pdf"), ["doc", "docx", "html", "htm", "md", "markdown", "odt", "rtf", "txt"]);
   for (const task of allTasks.filter((task) => task !== "to-pdf")) {
     assert.deepEqual(allowedImportExtensions(task), ["pdf"]);
   }

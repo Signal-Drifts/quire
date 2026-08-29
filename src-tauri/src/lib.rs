@@ -15,11 +15,11 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::Emitter;
 use walkdir::WalkDir;
 
 const MAX_FILES: usize = 20_000;
 const MAX_FOLDER_DEPTH: usize = 8;
+const STALE_RUN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const SUPPORTED: [&str; 11] = [
     "doc", "docx", "odt", "rtf", "md", "markdown", "html", "htm", "txt", "pdf", "text",
 ];
@@ -87,15 +87,6 @@ struct TaskRequest {
     output_type: String,
     paths: Vec<String>,
     detail: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TaskProgress {
-    run_id: String,
-    completed: usize,
-    total: usize,
-    message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -255,6 +246,53 @@ fn scratch_root() -> PathBuf {
     std::env::temp_dir().join("quire")
 }
 
+fn cleanup_stale_run_dirs_in(root: &Path, now: SystemTime) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let cutoff = now
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .saturating_sub(STALE_RUN_AGE.as_millis());
+    let mut failures = Vec::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(timestamp) = name
+            .strip_prefix("run-")
+            .and_then(|suffix| suffix.split('-').next())
+            .and_then(|value| value.parse::<u128>().ok())
+        else {
+            continue;
+        };
+        if timestamp > cutoff {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            failures.push(entry.path());
+            continue;
+        };
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        if fs::remove_dir_all(entry.path()).is_err() {
+            failures.push(entry.path());
+        }
+    }
+
+    Ok(failures)
+}
+
+fn cleanup_stale_run_dirs() -> io::Result<Vec<PathBuf>> {
+    cleanup_stale_run_dirs_in(&scratch_root(), SystemTime::now())
+}
+
 fn create_run_dir() -> Result<PathBuf, String> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -383,14 +421,14 @@ fn unique_path(folder: &Path, name: &str, extension: &str) -> PathBuf {
 fn conversion_output(source: &Path, output: &Path) -> Result<ConversionOutput, String> {
     let bytes = fs::metadata(output)
         .map(|metadata| metadata.len())
-        .map_err(|error| format!("Converted File Could Not Be Read: {error}"))?;
+        .map_err(|error| format!("Output File Could Not Be Read: {error}"))?;
     Ok(ConversionOutput {
         source: path_string(source),
         path: path_string(output),
         name: output
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Converted.pdf".to_string()),
+            .unwrap_or_else(|| "Output.pdf".to_string()),
         bytes,
     })
 }
@@ -847,12 +885,15 @@ fn split_pdf(
     run_dir: &Path,
     source_index: usize,
 ) -> Result<Vec<PathBuf>, String> {
+    let page_count = pdf_page_count(source)?;
+    if page_count == 1 {
+        return Err("This PDF has only one page and cannot be split.".to_string());
+    }
     let source_dir = run_dir.join(format!("split-{source_index}"));
     fs::create_dir_all(&source_dir)
         .map_err(|error| format!("Temporary Folder Could Not Be Created: {error}"))?;
     if output_type == "individual" {
         let qpdf = require_tool(&["qpdf", "qpdf.exe"], "qpdf")?;
-        let page_count = pdf_page_count(source)?;
         let mut results = Vec::new();
         for page in 1..=page_count {
             let output = source_dir.join(format!("{}-page-{page}.pdf", stem(source)));
@@ -1070,6 +1111,9 @@ where
 
         match request.task_function.as_str() {
             "to-pdf" => {
+                if sources.iter().any(|source| extension(source) == "pdf") {
+                    return Err("Add Non-PDF Files to Convert.".to_string());
+                }
                 let mut pdfs = Vec::new();
                 for (index, source) in sources.iter().enumerate() {
                     ensure_not_cancelled()?;
@@ -1101,6 +1145,9 @@ where
             "merge" => {
                 ensure_not_cancelled()?;
                 validate_pdf_sources(&sources)?;
+                if sources.len() < 2 {
+                    return Err("Select at Least Two PDFs to Merge.".to_string());
+                }
                 let output = unique_path(&run_dir, "Merged Documents", "pdf");
                 merge_pdfs(&sources, &output)?;
                 outputs.push(conversion_output(Path::new(""), &output)?);
@@ -1110,7 +1157,9 @@ where
                 ensure_not_cancelled()?;
                 validate_pdf_sources(&sources)?;
                 if sources.len() != 1 {
-                    return Err("Select One PDF to Split.".to_string());
+                    return Err(
+                        "Only One PDF Can Be Split at a Time. Please Select One PDF.".to_string(),
+                    );
                 }
                 for (index, source) in sources.iter().enumerate() {
                     for output in split_pdf(
@@ -1165,34 +1214,11 @@ where
 }
 
 #[tauri::command]
-async fn run_task(app: tauri::AppHandle, request: TaskRequest) -> Result<RunTaskResult, String> {
+async fn run_task(request: TaskRequest) -> Result<RunTaskResult, String> {
     let run_id = request.run_id.clone();
-    let _ = app.emit(
-        "task-progress",
-        TaskProgress {
-            run_id: run_id.clone(),
-            completed: 0,
-            total: request.paths.len().max(1),
-            message: "Starting Conversion".to_string(),
-        },
-    );
-    let progress_app = app.clone();
-    let progress_run_id = run_id.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        run_task_sync_with_progress(request, |completed, total, message| {
-            let _ = progress_app.emit(
-                "task-progress",
-                TaskProgress {
-                    run_id: progress_run_id.clone(),
-                    completed,
-                    total,
-                    message: message.to_string(),
-                },
-            );
-        })
-    })
-    .await
-    .map_err(|error| error.to_string())?;
+    let result = tauri::async_runtime::spawn_blocking(move || run_task_sync(request))
+        .await
+        .map_err(|error| error.to_string())?;
     if let Ok(mut runs) = cancelled_runs().lock() {
         runs.remove(&run_id);
     }
@@ -1206,7 +1232,7 @@ fn cancel_task(run_id: String) -> Result<(), String> {
     }
     cancelled_runs()
         .lock()
-        .map_err(|_| "Conversion Could Not Be Cancelled.".to_string())?
+        .map_err(|_| "Task Could Not Be Cancelled.".to_string())?
         .insert(run_id);
     Ok(())
 }
@@ -1234,7 +1260,7 @@ async fn save_outputs(
             return Err("Type an Absolute Save Path.".to_string());
         }
         if paths.is_empty() {
-            return Err("There Are No Converted Files to Save.".to_string());
+            return Err("There Are No Output Files to Save.".to_string());
         }
         let root_path = scratch_root();
         fs::create_dir_all(&root_path)
@@ -1246,7 +1272,7 @@ async fn save_outputs(
             let source = PathBuf::from(raw_path);
             let resolved = source
                 .canonicalize()
-                .map_err(|_| "A Converted File Could Not Be Found.".to_string())?;
+                .map_err(|_| "An Output File Could Not Be Found.".to_string())?;
             if !resolved.starts_with(&root) {
                 return Err(
                     "Quire Refused to Save a File Outside Its Temporary Folder.".to_string()
@@ -1255,9 +1281,9 @@ async fn save_outputs(
             let name = resolved
                 .file_name()
                 .map(|value| value.to_string_lossy().into_owned())
-                .ok_or_else(|| "A Converted File Has No Filename.".to_string())?;
+                .ok_or_else(|| "An Output File Has No Filename.".to_string())?;
             if !names.insert(name.to_lowercase()) {
-                return Err(format!("More Than One Converted File Is Named '{name}'."));
+                return Err(format!("More Than One Output File Is Named '{name}'."));
             }
             sources.push((resolved, name));
         }
@@ -1327,7 +1353,7 @@ async fn save_outputs(
                         let _ = fs::remove_file(staged_temp);
                     }
                     return Err(format!(
-                        "Converted Files Could Not Be Prepared for Overwrite: {error}. Existing Files Were Kept."
+                        "Output Files Could Not Be Prepared for Overwrite: {error}. Existing Files Were Kept."
                     ));
                 }
                 staged.push((temp, target.clone(), None));
@@ -1372,7 +1398,7 @@ async fn save_outputs(
                         let _ = fs::remove_file(remaining_temp);
                     }
                     return Err(format!(
-                        "Converted Files Could Not Be Overwritten: {error}. Existing Files Were Restored."
+                        "Output Files Could Not Be Overwritten: {error}. Existing Files Were Restored."
                     ));
                 }
             }
@@ -1401,7 +1427,7 @@ async fn save_outputs(
                         let _ = fs::remove_file(created_path);
                     }
                     return Err(format!(
-                        "Converted Files Could Not Be Saved: {error}. No Partial Files Were Kept."
+                        "Output Files Could Not Be Saved: {error}. No Partial Files Were Kept."
                     ));
                 }
             }
@@ -1469,6 +1495,17 @@ async fn discard_outputs(paths: Vec<String>) -> Result<Vec<String>, String> {
 }
 
 pub fn run() {
+    match cleanup_stale_run_dirs() {
+        Ok(failures) => {
+            for path in failures {
+                eprintln!(
+                    "Quire could not remove stale temporary folder: {}",
+                    path.display()
+                );
+            }
+        }
+        Err(error) => eprintln!("Quire could not inspect temporary folders: {error}"),
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -1494,6 +1531,32 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn startup_cleanup_removes_only_old_quire_run_directories() {
+        let root = test_dir("stale-run-cleanup");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10 * 24 * 60 * 60);
+        let now_ms = now.duration_since(UNIX_EPOCH).unwrap().as_millis();
+        let old_ms = now_ms - STALE_RUN_AGE.as_millis() - 1;
+        let fresh_ms = now_ms - STALE_RUN_AGE.as_millis() + 1;
+        let old = root.join(format!("run-{old_ms}-100-0"));
+        let fresh = root.join(format!("run-{fresh_ms}-100-1"));
+        let unrelated = root.join("run-invalid");
+        let matching_file = root.join(format!("run-{old_ms}-100-2"));
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&fresh).unwrap();
+        fs::create_dir_all(&unrelated).unwrap();
+        fs::write(&matching_file, b"not a directory").unwrap();
+
+        let failures = cleanup_stale_run_dirs_in(&root, now).unwrap();
+
+        assert!(failures.is_empty());
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        assert!(unrelated.exists());
+        assert!(matching_file.exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     fn test_pdf(folder: &Path, name: &str, pages: usize) -> PathBuf {
@@ -1672,6 +1735,16 @@ mod tests {
         );
         assert_eq!(
             run_task_sync(request(
+                "to-pdf",
+                "separate",
+                std::slice::from_ref(&pdf),
+                ""
+            ))
+            .unwrap_err(),
+            "Add Non-PDF Files to Convert."
+        );
+        assert_eq!(
+            run_task_sync(request(
                 "unknown",
                 "anything",
                 std::slice::from_ref(&pdf),
@@ -1723,9 +1796,28 @@ mod tests {
             );
         }
         assert_eq!(
-            run_task_sync(request("split", "individual", &[pdf, second_pdf], "")).unwrap_err(),
-            "Select One PDF to Split."
+            run_task_sync(request("merge", "merged", std::slice::from_ref(&pdf), "")).unwrap_err(),
+            "Select at Least Two PDFs to Merge."
         );
+        assert_eq!(
+            run_task_sync(request("split", "individual", &[pdf, second_pdf], "")).unwrap_err(),
+            "Only One PDF Can Be Split at a Time. Please Select One PDF."
+        );
+        let _ = fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn native_backend_rejects_splitting_a_one_page_pdf() {
+        let folder = test_dir("one-page-split");
+        let pdf = test_pdf(&folder, "One Page", 1);
+
+        for (output, detail) in [("individual", ""), ("ranges", "1")] {
+            assert_eq!(
+                run_task_sync(request("split", output, std::slice::from_ref(&pdf), detail))
+                    .unwrap_err(),
+                "This PDF has only one page and cannot be split."
+            );
+        }
         let _ = fs::remove_dir_all(folder);
     }
 
@@ -2152,7 +2244,7 @@ mod tests {
         assert_eq!(
             tauri::async_runtime::block_on(save_outputs(Vec::new(), path_string(&folder), false,))
                 .unwrap_err(),
-            "There Are No Converted Files to Save."
+            "There Are No Output Files to Save."
         );
         assert_eq!(
             tauri::async_runtime::block_on(save_outputs(
@@ -2161,7 +2253,7 @@ mod tests {
                 false,
             ))
             .unwrap_err(),
-            "A Converted File Could Not Be Found."
+            "An Output File Could Not Be Found."
         );
 
         let source = test_pdf(&folder, "Source", 1);
@@ -2220,7 +2312,7 @@ mod tests {
                 false,
             ))
             .unwrap_err(),
-            "More Than One Converted File Is Named 'Source-compressed.pdf'."
+            "More Than One Output File Is Named 'Source-compressed.pdf'."
         );
         assert_eq!(
             tauri::async_runtime::block_on(save_outputs(

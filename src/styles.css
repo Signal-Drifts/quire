@@ -244,6 +244,13 @@ select:focus-visible {
   cursor: default;
 }
 
+.function-field select:disabled,
+.output-field select:disabled {
+  border-color: var(--line-strong);
+  background-color: var(--paper);
+  transition: none;
+}
+
 .field select:hover:not(:disabled),
 .field input:hover:not(:disabled) {
   border-color: #829d99;
@@ -264,7 +271,7 @@ select:focus-visible {
   height: 43px;
   min-width: 0;
   box-sizing: border-box;
-  padding: 0 46px 0 12px;
+  padding: 0 12px 0 46px;
   border: 1px solid var(--line-strong);
   border-radius: 9px;
   color: var(--ink);
@@ -308,7 +315,7 @@ select:focus-visible {
 #rotate-pages-mode {
   position: absolute;
   top: 0;
-  right: 0;
+  left: 0;
   z-index: 2;
   width: 46px;
   height: 41px;
@@ -318,10 +325,15 @@ select:focus-visible {
   cursor: pointer;
 }
 
+.rotate-pages-control:has(#rotate-pages[hidden]) #rotate-pages-mode {
+  left: 0;
+  width: 100%;
+}
+
 .rotate-pages-arrow {
   position: absolute;
   top: 50%;
-  right: 17px;
+  left: 17px;
   width: 0;
   height: 0;
   border-right: 5px solid transparent;
@@ -562,7 +574,6 @@ td {
   padding: 8px 12px;
   overflow: hidden;
   border-bottom: 1px solid var(--line);
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -714,6 +725,17 @@ tbody tr.drag-over td {
   transform: translate(-50%, -50%);
   cursor: default;
   touch-action: none;
+}
+
+.save-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  background: rgb(10 45 41 / 14%);
+}
+
+.save-dialog {
+  z-index: 5;
 }
 
 .notice button,

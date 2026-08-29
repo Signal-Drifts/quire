@@ -3,11 +3,14 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   acceptsExtension,
+  completedStatusLabel,
   conversionIssue,
   conversionTargets,
   extensionLabel,
   formatBytes,
   outputChoices,
+  taskFailureFallback,
+  taskFailureSummary,
   type TaskFunction,
 } from "./task-options.ts";
 import {
@@ -20,6 +23,7 @@ import {
   validImportDetails,
   type RotatePageMode,
 } from "./import-rules.ts";
+import { reorderQueue } from "./queue-order.ts";
 import {
   selectEveryQueuePath,
   selectQueueArrow,
@@ -57,7 +61,7 @@ type SaveResult = {
   saved: string[];
 };
 
-type QueueState = "ready" | "working" | "converted" | "saved" | "failed";
+type QueueState = "ready" | "converted" | "saved" | "failed";
 
 type QueueItem = FileEntry & {
   state: QueueState;
@@ -72,21 +76,16 @@ type TaskRequest = {
   detail: string;
 };
 
-type TaskProgress = {
-  runId: string;
-  completed: number;
-  total: number;
-  message: string;
-};
-
 const element = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
 const functionSelect = element<HTMLSelectElement>("task-function");
+const outputField = element<HTMLElement>("output-field");
 const outputSelect = element<HTMLSelectElement>("output-type");
 const detailControls = element<HTMLElement>("detail-controls");
 const pageRangesField = element<HTMLElement>("page-ranges-field");
 const pageRangesInput = element<HTMLInputElement>("page-ranges");
 const rotatePagesField = element<HTMLElement>("rotate-pages-field");
+const rotatePagesControl = document.querySelector<HTMLElement>(".rotate-pages-control")!;
 const rotatePagesMode = element<HTMLSelectElement>("rotate-pages-mode");
 const rotatePagesStatic = element<HTMLElement>("rotate-pages-static");
 const rotatePagesPrompt = element<HTMLElement>("rotate-pages-prompt");
@@ -102,6 +101,7 @@ const removeSelectedButton = element<HTMLButtonElement>("remove-selected");
 const convertButton = element<HTMLButtonElement>("convert");
 const saveButton = element<HTMLButtonElement>("save");
 const workspace = document.querySelector<HTMLElement>(".workspace")!;
+const taskControls = document.querySelector<HTMLElement>(".task-controls")!;
 const notice = element<HTMLElement>("notice");
 const noticeTitle = element<HTMLElement>("notice-title");
 const noticeCopy = element<HTMLElement>("notice-copy");
@@ -110,6 +110,7 @@ const noticeActions = element<HTMLElement>("notice-actions");
 const noticeCancel = element<HTMLButtonElement>("notice-cancel");
 const noticeConfirm = element<HTMLButtonElement>("notice-confirm");
 const saveDialog = element<HTMLElement>("save-dialog");
+const saveModalBackdrop = element<HTMLElement>("save-modal-backdrop");
 const dismissSave = element<HTMLButtonElement>("dismiss-save");
 const saveSummary = element<HTMLElement>("save-summary");
 const saveDestinationLabel = element<HTMLElement>("save-destination-label");
@@ -136,7 +137,7 @@ let noticeResolver: ((confirmed: boolean) => void) | null = null;
 let noticePersistent = false;
 let activeRunId = "";
 let cancellationRequested = false;
-let activeEligiblePaths: string[] = [];
+let saveDialogOpen = false;
 let activeDraggedPopup: HTMLElement | null = null;
 let pendingDraggedPopup: HTMLElement | null = null;
 let popupPointerId = -1;
@@ -198,25 +199,39 @@ function hideNotice(force = false): void {
   settleNotice(false);
 }
 
+function setSaveDialogOpen(open: boolean): void {
+  saveDialogOpen = open;
+  saveModalBackdrop.hidden = !open;
+  for (const child of workspace.children) {
+    if (child !== saveDialog && child !== saveModalBackdrop) {
+      (child as HTMLElement).inert = open;
+    }
+  }
+}
+
 function closeSaveDialog(): void {
   saveDialog.hidden = true;
   saveConflict.hidden = true;
   overwriteSave.hidden = true;
   activeDraggedPopup = null;
+  setSaveDialogOpen(false);
+  renderControls();
 }
 
 function showSaveDialog(): void {
   if (outputs.length === 0 || busy) return;
   hideNotice();
   saveDestination.value = "";
-  saveSummary.textContent = `${outputs.length} Converted File${outputs.length === 1 ? "" : "s"} to Save.`;
+  saveSummary.textContent = `${outputs.length} Output File${outputs.length === 1 ? "" : "s"} to Save.`;
   saveDestinationLabel.textContent = outputs.length === 1 ? "Save To (Folder and Filename)" : "Destination Folder";
   saveDestination.placeholder = outputs.length === 1 ? "Type or Select a Folder and Filename" : "Type or Select a Folder Path";
   saveConflict.hidden = true;
   overwriteSave.hidden = true;
   applySave.disabled = true;
   centerPopup(saveDialog);
+  setSaveDialogOpen(true);
   saveDialog.hidden = false;
+  renderControls();
   saveDestination.focus();
 }
 
@@ -240,7 +255,7 @@ function confirmNotice(message: string, confirmLabel: string): Promise<boolean> 
 }
 
 function readyForImport(): boolean {
-  return importIsReady({
+  return !saveDialogOpen && importIsReady({
     task: selectedFunction(),
     outputType: outputSelect.value,
     pageRanges: pageRangesInput.value,
@@ -317,22 +332,24 @@ function populateOutputChoices(): void {
   outputSelect.append(placeholder);
 
   const task = selectedFunction();
+  const choices = task ? outputChoices(task) : [];
+  outputField.hidden = choices.length === 1;
   outputSelect.disabled = !task;
   if (task) {
-    for (const choice of outputChoices(task)) {
+    for (const choice of choices) {
       const option = document.createElement("option");
       option.value = choice.value;
       option.textContent = choice.label;
       outputSelect.append(option);
     }
+    if (choices.length === 1) outputSelect.value = choices[0]!.value;
   }
   updateDetailControls();
 }
 
 function rowStatus(item: QueueItem, task: TaskFunction | null): { label: string; className: string } {
   if (task && !acceptsExtension(task, item.extension)) return { label: "Unsupported", className: "failed" };
-  if (item.state === "working") return { label: "Converting", className: "working" };
-  if (item.state === "converted") return { label: "Converted", className: "" };
+  if (item.state === "converted") return { label: task ? completedStatusLabel(task) : "Done", className: "" };
   if (item.state === "saved") return { label: "Saved", className: "" };
   if (item.state === "failed") return { label: "Failed", className: "failed" };
   return { label: "Ready", className: "" };
@@ -348,12 +365,12 @@ function convertedBytesFor(item: QueueItem): number | null {
 
 function hasCombinedOutput(): boolean {
   const task = selectedFunction();
-  return outputs.length > 0 && (task === "merge" || (task === "to-pdf" && outputSelect.value === "combined"));
+  return outputs.length > 0 && task === "to-pdf" && outputSelect.value === "combined";
 }
 
 function setSelection(index: number, extendRange: boolean, preserveSelection: boolean): void {
   const item = queue[index];
-  if (!item || busy) return;
+  if (!item || busy || saveDialogOpen) return;
   const next = selectQueueIndex(
     queue.map((entry) => entry.path),
     { selected: selectedPaths, anchor: selectionAnchorPath, focus: selectionFocusPath },
@@ -369,7 +386,7 @@ function setSelection(index: number, extendRange: boolean, preserveSelection: bo
 }
 
 function selectWithArrow(direction: -1 | 1, extendRange: boolean, preserveSelection: boolean): void {
-  if (queue.length === 0 || busy) return;
+  if (queue.length === 0 || busy || saveDialogOpen) return;
   const next = selectQueueArrow(
     queue.map((entry) => entry.path),
     { selected: selectedPaths, anchor: selectionAnchorPath, focus: selectionFocusPath },
@@ -385,7 +402,7 @@ function selectWithArrow(direction: -1 | 1, extendRange: boolean, preserveSelect
 }
 
 function selectAll(): void {
-  if (queue.length === 0 || busy) return;
+  if (queue.length === 0 || busy || saveDialogOpen) return;
   const next = selectEveryQueuePath(queue.map((item) => item.path));
   selectedPaths = next.selected;
   selectionAnchorPath = next.anchor;
@@ -399,22 +416,25 @@ function combinedOrderEnabled(): boolean {
   return !busy && (task === "merge" || (task === "to-pdf" && outputSelect.value === "combined"));
 }
 
-function moveQueueItem(source: string, before: string): void {
-  if (source === before) return;
-  const sourceIndex = queue.findIndex((item) => item.path === source);
-  const beforeIndex = queue.findIndex((item) => item.path === before);
-  if (sourceIndex < 0 || beforeIndex < 0) return;
-  const [item] = queue.splice(sourceIndex, 1);
-  const nextIndex = queue.findIndex((entry) => entry.path === before);
-  queue.splice(nextIndex, 0, item!);
+function moveQueueItem(source: string, target: string, side: "before" | "after"): void {
+  if (busy || saveDialogOpen) return;
+  const reordered = reorderQueue(queue, source, target, side);
+  if (reordered === queue) return;
+  queue = reordered;
   resetConvertedState();
   render();
 }
 
 function moveQueueItemByOffset(path: string, offset: -1 | 1): void {
+  if (busy || saveDialogOpen) return;
+  const task = selectedFunction();
+  if (!task) return;
+  const orderable = queue.filter((item) => acceptsExtension(task, item.extension));
+  const sourceOrderIndex = orderable.findIndex((item) => item.path === path);
+  const target = orderable[sourceOrderIndex + offset];
+  if (sourceOrderIndex < 0 || !target) return;
   const sourceIndex = queue.findIndex((item) => item.path === path);
-  const targetIndex = sourceIndex + offset;
-  if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= queue.length) return;
+  const targetIndex = queue.findIndex((item) => item.path === target.path);
   [queue[sourceIndex], queue[targetIndex]] = [queue[targetIndex]!, queue[sourceIndex]!];
   resetConvertedState();
   render();
@@ -424,14 +444,17 @@ function renderRows(): void {
   rowsBody.replaceChildren();
   const task = selectedFunction();
   const draggable = combinedOrderEnabled();
+  const orderable = task ? queue.filter((item) => acceptsExtension(task, item.extension)) : [];
 
   for (const [index, item] of queue.entries()) {
+    const orderIndex = orderable.findIndex((entry) => entry.path === item.path);
+    const rowOrderEnabled = draggable && orderable.length > 1 && orderIndex >= 0;
     const row = document.createElement("tr");
     row.dataset.path = item.path;
-    row.draggable = draggable;
+    row.draggable = rowOrderEnabled;
     row.classList.toggle("selected", selectedPaths.has(item.path));
     row.setAttribute("aria-selected", String(selectedPaths.has(item.path)));
-    row.title = draggable ? `${item.path}\nDrag to Reorder` : item.path;
+    row.title = rowOrderEnabled ? `${item.path}\nDrag to Reorder` : item.path;
     row.addEventListener("mousedown", (event) => {
       if (event.button === 0 && event.shiftKey && !(event.target as HTMLElement).closest("button")) {
         event.preventDefault();
@@ -441,7 +464,7 @@ function renderRows(): void {
       setSelection(index, event.shiftKey, event.metaKey || event.ctrlKey);
     });
 
-    if (draggable) {
+    if (rowOrderEnabled) {
       row.addEventListener("dragstart", () => {
         draggingPath = item.path;
         row.classList.add("dragging");
@@ -459,7 +482,9 @@ function renderRows(): void {
       row.addEventListener("drop", (event) => {
         event.preventDefault();
         row.classList.remove("drag-over");
-        if (draggingPath) moveQueueItem(draggingPath, item.path);
+        const bounds = row.getBoundingClientRect();
+        const side = event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
+        if (draggingPath) moveQueueItem(draggingPath, item.path, side);
       });
     }
 
@@ -472,7 +497,7 @@ function renderRows(): void {
     const nameCell = document.createElement("td");
     nameCell.className = "file-name";
     nameCell.title = item.path;
-    if (draggable) {
+    if (rowOrderEnabled) {
       const orderControls = document.createElement("span");
       orderControls.className = "order-controls";
       const moveUp = document.createElement("button");
@@ -481,7 +506,7 @@ function renderRows(): void {
       moveUp.textContent = "↑";
       moveUp.title = `Move ${item.name} Up`;
       moveUp.setAttribute("aria-label", `Move ${item.name} Up`);
-      moveUp.disabled = index === 0;
+      moveUp.disabled = orderIndex === 0;
       moveUp.addEventListener("click", (event) => {
         event.stopPropagation();
         moveQueueItemByOffset(item.path, -1);
@@ -492,7 +517,7 @@ function renderRows(): void {
       moveDown.textContent = "↓";
       moveDown.title = `Move ${item.name} Down`;
       moveDown.setAttribute("aria-label", `Move ${item.name} Down`);
-      moveDown.disabled = index === queue.length - 1;
+      moveDown.disabled = orderIndex === orderable.length - 1;
       moveDown.addEventListener("click", (event) => {
         event.stopPropagation();
         moveQueueItemByOffset(item.path, 1);
@@ -516,6 +541,7 @@ function renderRows(): void {
       : `Original: ${formatBytes(item.bytes)} · New: ${formatBytes(convertedBytes)}`;
 
     const statusCell = document.createElement("td");
+    statusCell.className = "status-cell";
     const status = rowStatus(item, task);
     const statusLabel = document.createElement("span");
     statusLabel.className = ["row-status", status.className].filter(Boolean).join(" ");
@@ -543,25 +569,77 @@ function renderRows(): void {
   }
 }
 
+function updateRenderedRows(changedPaths: Set<string> | null = null): void {
+  const renderedRows = new Map(
+    [...rowsBody.querySelectorAll<HTMLTableRowElement>("tr[data-path]")]
+      .map((row) => [row.dataset.path ?? "", row]),
+  );
+  if (renderedRows.size !== queue.length || queue.some((item) => !renderedRows.has(item.path))) {
+    renderRows();
+    return;
+  }
+
+  const task = selectedFunction();
+  const orderable = task ? queue.filter((item) => acceptsExtension(task, item.extension)) : [];
+  for (const item of queue) {
+    const row = renderedRows.get(item.path)!;
+    const orderIndex = orderable.findIndex((entry) => entry.path === item.path);
+    row.classList.toggle("selected", selectedPaths.has(item.path));
+    row.setAttribute("aria-selected", String(selectedPaths.has(item.path)));
+    row.draggable = !busy && combinedOrderEnabled() && orderable.length > 1 && orderIndex >= 0;
+
+    const orderButtons = row.querySelectorAll<HTMLButtonElement>(".order-button");
+    if (orderButtons.length === 2) {
+      orderButtons[0]!.disabled = busy || orderIndex <= 0;
+      orderButtons[1]!.disabled = busy || orderIndex < 0 || orderIndex >= orderable.length - 1;
+    }
+
+    if (changedPaths === null || changedPaths.has(item.path)) {
+      const convertedBytes = convertedBytesFor(item);
+      const combined = task !== null
+        && hasCombinedOutput()
+        && acceptsExtension(task, item.extension)
+        && (item.state === "converted" || item.state === "saved");
+      const sizeCell = row.querySelector<HTMLTableCellElement>(".file-size")!;
+      sizeCell.textContent = `${formatBytes(item.bytes)} / ${combined ? "Combined" : convertedBytes === null ? "—" : formatBytes(convertedBytes)}`;
+      sizeCell.title = convertedBytes === null
+        ? combined ? "Original Size / Included in Combined Output" : "Original Size / New Size"
+        : `Original: ${formatBytes(item.bytes)} · New: ${formatBytes(convertedBytes)}`;
+
+      const status = rowStatus(item, task);
+      const statusLabel = row.querySelector<HTMLSpanElement>(".row-status")!;
+      statusLabel.className = ["row-status", status.className].filter(Boolean).join(" ");
+      statusLabel.textContent = status.label;
+      statusLabel.title = item.message;
+    }
+  }
+}
+
+function renderApplyButton(): void {
+  const taskRunning = activeRunId !== "";
+  taskControls.inert = busy || saveDialogOpen;
+  convertButton.disabled = saveDialogOpen || (taskRunning
+    ? cancellationRequested
+    : busy || !selectedFunction() || queue.length === 0);
+  convertButton.textContent = taskRunning ? cancellationRequested ? "Cancelling" : "Cancel" : "Apply";
+}
+
 function renderControls(): void {
-  const functionChosen = Boolean(selectedFunction());
   importButton.disabled = !readyForImport();
   dropZone.classList.toggle("busy", !readyForImport());
-  functionSelect.disabled = busy || importing;
-  outputSelect.disabled = busy || importing || !selectedFunction();
-  pageRangesInput.disabled = busy || importing;
-  rotatePagesMode.disabled = busy || importing;
-  rotatePagesInput.disabled = busy || importing || rotatePagesInput.hidden;
+  const blocked = busy || importing || saveDialogOpen;
+  functionSelect.disabled = blocked;
+  outputSelect.disabled = blocked || !selectedFunction();
+  pageRangesInput.disabled = blocked;
+  rotatePagesMode.disabled = blocked;
+  rotatePagesInput.disabled = blocked || rotatePagesInput.hidden;
   pageRangesInput.setAttribute("aria-invalid", String(!pageRangesField.hidden && !validImportDetails("split", "ranges", pageRangesInput.value, "")));
   rotatePagesInput.setAttribute("aria-invalid", String(!rotatePagesInput.hidden && !validImportDetails("rotate", outputSelect.value, "", rotatePagesInput.value, rotatePagesMode.value as RotatePageMode)));
-  clearButton.disabled = busy || importing || !clearIsEnabled(queue.length);
-  removeSelectedButton.disabled = busy || importing || !removeSelectedIsEnabled(selectedPaths.size);
+  clearButton.disabled = blocked || !clearIsEnabled(queue.length);
+  removeSelectedButton.disabled = blocked || !removeSelectedIsEnabled(selectedPaths.size);
   removeSelectedButton.textContent = `Remove Selected (${selectedPaths.size})`;
-  convertButton.disabled = busy
-    ? cancellationRequested || activeRunId === ""
-    : !functionChosen || queue.length === 0;
-  saveButton.disabled = busy || outputs.length === 0;
-  convertButton.textContent = busy ? cancellationRequested ? "Cancelling" : "Cancel" : "Convert";
+  saveButton.disabled = busy || saveDialogOpen || outputs.length === 0;
+  renderApplyButton();
   convertButton.classList.remove("reconvert");
 }
 
@@ -572,7 +650,7 @@ function render(): void {
 }
 
 async function removeQueuePath(path: string): Promise<void> {
-  if (busy) return;
+  if (busy || saveDialogOpen) return;
   if (outputs.length > 0) await discardOutputs();
   queue = queue.filter((item) => item.path !== path);
   selectedPaths.delete(path);
@@ -590,7 +668,7 @@ function emptyQueueState(): void {
 }
 
 async function removeSelectedItems(): Promise<void> {
-  if (busy || importing || selectedPaths.size === 0) return;
+  if (busy || importing || saveDialogOpen || selectedPaths.size === 0) return;
   if (outputs.length > 0) await discardOutputs();
   queue = queue.filter((item) => !selectedPaths.has(item.path));
   selectedPaths.clear();
@@ -620,6 +698,7 @@ async function addCollectedFiles(collected: CollectedFiles): Promise<void> {
 }
 
 async function addPaths(paths: string[]): Promise<void> {
+  if (busy || saveDialogOpen) return;
   const requestEpoch = importEpoch;
   importing = true;
   render();
@@ -635,7 +714,7 @@ async function addPaths(paths: string[]): Promise<void> {
 }
 
 async function addBrowserFiles(files: File[]): Promise<void> {
-  if (!readyForImport()) return;
+  if (busy || saveDialogOpen || !readyForImport()) return;
   importing = true;
   render();
   try {
@@ -664,12 +743,13 @@ async function addBrowserFiles(files: File[]): Promise<void> {
 }
 
 async function chooseFiles(): Promise<void> {
-  if (!readyForImport()) return;
+  if (busy || saveDialogOpen || !readyForImport()) return;
   const task = selectedFunction();
   const extensions = allowedImportExtensions(task);
 
   if (!isTauri) {
     browserFileInput.accept = extensions.map((extension) => `.${extension}`).join(",");
+    browserFileInput.multiple = task !== "split";
     browserFileInput.value = "";
     pickerOpen = true;
     renderControls();
@@ -688,7 +768,7 @@ async function chooseFiles(): Promise<void> {
   renderControls();
   try {
     const chosen = await open({
-      multiple: true,
+      multiple: task !== "split",
       title: "Import Files",
       filters: [{ name: !task || task === "to-pdf" ? "Documents" : "PDF Documents", extensions }],
     });
@@ -704,7 +784,7 @@ async function chooseFiles(): Promise<void> {
 
 async function runTask(): Promise<void> {
   const task = selectedFunction();
-  if (!task || busy) return;
+  if (!task || busy || saveDialogOpen) return;
   if (!outputSelect.value) {
     showNotice("Please Select an Output Type.");
     return;
@@ -734,11 +814,7 @@ async function runTask(): Promise<void> {
   const eligiblePaths = new Set(eligible.map((item) => item.path));
   cancellationRequested = false;
   busy = true;
-  queue = queue.map((item) => eligiblePaths.has(item.path)
-    ? { ...item, state: "working", message: "Converting" }
-    : item);
   hideNotice();
-  render();
 
   const createRequest = (paths: string[]): TaskRequest => ({
     runId: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
@@ -749,6 +825,8 @@ async function runTask(): Promise<void> {
   });
   const combinedTransaction = task === "merge" || task === "split" || (task === "to-pdf" && outputSelect.value === "combined");
   const convertedOutputs: ConversionOutput[] = [];
+  const completedPaths = new Set<string>();
+  const failedPaths = new Map<string, string>();
   let failedCount = 0;
   const failureMessages: string[] = [];
   let cancelled = false;
@@ -763,50 +841,48 @@ async function runTask(): Promise<void> {
       const paths = batch.map((item) => item.path);
       const request = createRequest(paths);
       activeRunId = request.runId;
-      activeEligiblePaths = paths;
-      renderControls();
+      renderApplyButton();
       try {
         const result = await invoke<RunTaskResult>("run_task", { request });
         convertedOutputs.push(...result.outputs);
-        const completed = new Set(paths);
-        queue = queue.map((item) => completed.has(item.path)
-          ? { ...item, state: "converted", message: "Converted" }
-          : item);
+        paths.forEach((path) => completedPaths.add(path));
       } catch (error) {
-        const message = errorMessage(error, "Conversion Failed.");
+        const message = errorMessage(error, taskFailureFallback(task));
         if (message === "Conversion Cancelled.") {
           cancelled = true;
           break;
         }
         failedCount += batch.length;
         failureMessages.push(message);
-        const failed = new Set(paths);
-        queue = queue.map((item) => failed.has(item.path)
-          ? { ...item, state: "failed", message }
-          : item);
+        paths.forEach((path) => failedPaths.set(path, message));
       }
-      renderRows();
     }
     outputs = convertedOutputs;
+    if (task === "split" && convertedOutputs.length > 0) pageRangesInput.value = "";
     saved = false;
+    queue = queue.map((item) => {
+      if (completedPaths.has(item.path)) {
+        const status = completedStatusLabel(task);
+        return { ...item, state: "converted", message: status };
+      }
+      const failure = failedPaths.get(item.path);
+      return failure ? { ...item, state: "failed", message: failure } : item;
+    });
     if (cancelled) hideNotice();
     else if (failedCount > 0) {
       const uniqueMessages = [...new Set(failureMessages)];
       const message = uniqueMessages.length === 1
         ? uniqueMessages[0]!
-        : `${failedCount} Files Could Not Be Converted.`;
+        : taskFailureSummary(task, failedCount);
       showNotice(message, true);
     }
     else hideNotice();
   } finally {
-    queue = queue.map((item) => item.state === "working"
-      ? { ...item, state: "ready", message: "Ready" }
-      : item);
     activeRunId = "";
-    activeEligiblePaths = [];
     cancellationRequested = false;
     busy = false;
-    render();
+    updateRenderedRows(eligiblePaths);
+    renderControls();
   }
 }
 
@@ -819,6 +895,9 @@ async function applySaveResults(overwrite = false): Promise<void> {
   busy = true;
   applySave.disabled = true;
   overwriteSave.disabled = true;
+  dismissSave.disabled = true;
+  cancelSave.disabled = true;
+  changeSaveFolder.disabled = true;
   render();
   try {
     await invoke<SaveResult>("save_outputs", { paths: outputs.map((output) => output.path), destination, overwrite });
@@ -831,7 +910,7 @@ async function applySaveResults(overwrite = false): Promise<void> {
     closeSaveDialog();
     hideNotice();
   } catch (error) {
-    const message = errorMessage(error, "Converted Files Could Not Be Saved.");
+    const message = errorMessage(error, "Output Files Could Not Be Saved.");
     const existingPath = message.startsWith("FILE_EXISTS::") ? message.slice("FILE_EXISTS::".length) : "";
     saveConflict.textContent = existingPath
       ? outputs.length === 1
@@ -844,16 +923,19 @@ async function applySaveResults(overwrite = false): Promise<void> {
     busy = false;
     applySave.disabled = saveDestination.value.trim() === "";
     overwriteSave.disabled = false;
+    dismissSave.disabled = false;
+    cancelSave.disabled = false;
+    changeSaveFolder.disabled = false;
     render();
   }
 }
 
 async function clearQueue(): Promise<void> {
-  if (busy || importing) return;
+  if (busy || importing || saveDialogOpen) return;
   importEpoch += 1;
   importing = false;
   if (outputs.length > 0 && !saved) {
-    const discard = await confirmNotice("Discard the converted files that have not been saved?", "Discard");
+    const discard = await confirmNotice("Discard the output files that have not been saved?", "Discard");
     if (!discard) return;
   }
   await discardOutputs();
@@ -863,6 +945,7 @@ async function clearQueue(): Promise<void> {
 }
 
 async function changeFunction(): Promise<void> {
+  if (saveDialogOpen) return;
   importEpoch += 1;
   importing = false;
   await discardOutputs();
@@ -876,6 +959,7 @@ async function changeFunction(): Promise<void> {
 }
 
 async function changeOutput(): Promise<void> {
+  if (saveDialogOpen) return;
   await discardOutputs();
   clearSelection();
   updateDetailControls();
@@ -884,6 +968,7 @@ async function changeOutput(): Promise<void> {
 }
 
 async function changeRotatePageMode(): Promise<void> {
+  if (saveDialogOpen) return;
   await discardOutputs();
   clearSelection();
   rotatePagesInput.value = "";
@@ -894,6 +979,7 @@ async function changeRotatePageMode(): Promise<void> {
 }
 
 async function changeRotatePageValue(): Promise<void> {
+  if (saveDialogOpen) return;
   await discardOutputs();
   clearSelection();
   hideNotice();
@@ -910,6 +996,10 @@ pageRangesInput.addEventListener("input", renderControls);
 rotatePagesMode.addEventListener("change", () => {
   void changeRotatePageMode();
 });
+rotatePagesControl.addEventListener("click", (event) => {
+  if (rotatePagesMode.disabled || event.target === rotatePagesInput || event.target === rotatePagesMode) return;
+  rotatePagesMode.showPicker();
+});
 rotatePagesInput.addEventListener("input", () => void changeRotatePageValue());
 importButton.addEventListener("click", () => void chooseFiles());
 browserFileInput.addEventListener("change", () => {
@@ -921,13 +1011,13 @@ browserFileInput.addEventListener("change", () => {
 async function cancelActiveTask(): Promise<void> {
   if (!busy || !activeRunId || cancellationRequested) return;
   cancellationRequested = true;
-  renderControls();
+  renderApplyButton();
   try {
     await invoke("cancel_task", { runId: activeRunId });
   } catch {
     cancellationRequested = false;
-    showNotice("The Conversion Could Not Be Cancelled.", true);
-    renderControls();
+    showNotice("The Task Could Not Be Cancelled.", true);
+    renderApplyButton();
   }
 }
 
@@ -1052,7 +1142,7 @@ for (const popup of [notice, saveDialog]) {
 document.addEventListener("keydown", (event) => {
   const target = event.target as HTMLElement | null;
   const editing = target?.matches("input, select, textarea, [contenteditable='true']") ?? false;
-  if (editing || busy || queue.length === 0) return;
+  if (saveDialogOpen || editing || busy || queue.length === 0) return;
 
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
     event.preventDefault();
@@ -1071,16 +1161,9 @@ document.addEventListener("keydown", (event) => {
 });
 
 if (isTauri) {
-  void listen<TaskProgress>("task-progress", ({ payload }) => {
-    if (payload.runId !== activeRunId) return;
-    const activePaths = new Set(activeEligiblePaths);
-    queue = queue.map((item) => activePaths.has(item.path)
-      ? { ...item, message: `${payload.message}: ${payload.completed} of ${payload.total}` }
-      : item);
-    renderRows();
-  });
   void listen<{ paths: string[] }>("tauri://drag-drop", ({ payload }) => {
     dropZone.classList.remove("over");
+    if (busy || saveDialogOpen) return;
     if (readyForImport()) void addPaths(payload.paths);
     else showNotice("Choose a Function and Choose a Type Before Importing Files.");
   });

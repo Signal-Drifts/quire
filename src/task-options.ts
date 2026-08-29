@@ -35,14 +35,56 @@ const choices: Record<TaskFunction, OutputChoice[]> = {
 
 const pdfOnly = new Set<TaskFunction>(["extract", "merge", "split", "rotate", "compress", "ocr"]);
 
+const completedStatus: Record<TaskFunction, string> = {
+  compress: "Compressed",
+  "to-pdf": "Converted",
+  extract: "Extracted",
+  ocr: "Searchable",
+  merge: "Merged",
+  rotate: "Rotated",
+  split: "Done",
+};
+
+const failureAction: Record<TaskFunction, string> = {
+  compress: "Compressed",
+  "to-pdf": "Converted",
+  extract: "Extracted",
+  ocr: "Made Searchable",
+  merge: "Merged",
+  rotate: "Rotated",
+  split: "Split",
+};
+
+const failureTitle: Record<TaskFunction, string> = {
+  compress: "Compression Failed.",
+  "to-pdf": "PDF Conversion Failed.",
+  extract: "Extraction Failed.",
+  ocr: "OCR Failed.",
+  merge: "Merge Failed.",
+  rotate: "Rotation Failed.",
+  split: "Split Failed.",
+};
+
 export function outputChoices(task: TaskFunction): OutputChoice[] {
   return choices[task];
+}
+
+export function completedStatusLabel(task: TaskFunction): string {
+  return completedStatus[task];
+}
+
+export function taskFailureFallback(task: TaskFunction): string {
+  return failureTitle[task];
+}
+
+export function taskFailureSummary(task: TaskFunction, count: number): string {
+  return `${count} Files Could Not Be ${failureAction[task]}.`;
 }
 
 export function acceptsExtension(task: TaskFunction, extension: string): boolean {
   const normalized = extension.toLowerCase().replace(/^\./, "");
   if (pdfOnly.has(task)) return normalized === "pdf";
-  return ["doc", "docx", "odt", "rtf", "md", "markdown", "html", "htm", "txt", "pdf"].includes(normalized);
+  return ["doc", "docx", "odt", "rtf", "md", "markdown", "html", "htm", "txt"].includes(normalized);
 }
 
 export function conversionTargets<T extends { path: string; state: string }>(
@@ -55,6 +97,7 @@ export function conversionTargets<T extends { path: string; state: string }>(
     ? ready
     : ready.filter((item) => selectedPaths.has(item.path));
   if (task === "split") return targeted.length === 1 ? targeted : [];
+  if (task === "merge") return targeted.length >= 2 ? targeted : [];
   return targeted;
 }
 
@@ -63,12 +106,18 @@ export function conversionIssue<T extends { path: string; state: string }>(
   compatible: T[],
   selectedPaths: Set<string>,
 ): string {
+  if (task === "to-pdf" && compatible.length === 0) {
+    return "Add Non-PDF Files to Convert.";
+  }
   const ready = compatible.filter((item) => item.state === "ready");
   const targeted = selectedPaths.size === 0
     ? ready
     : ready.filter((item) => selectedPaths.has(item.path));
   if (task === "split" && targeted.length !== 1) {
-    return "Select exactly one ready PDF to split.";
+    return "Only One PDF Can Be Split at a Time. Please Select One PDF.";
+  }
+  if (task === "merge" && targeted.length < 2) {
+    return "Select at least two ready PDFs to merge.";
   }
   if (targeted.length === 0) {
     return selectedPaths.size > 0
