@@ -1,22 +1,30 @@
 # Quire
 
-Every conversion, on your laptop. No uploads, no page limits, no watermark.
+Everything PDF & Free.
+
+Website: [https://hgus107.github.io/Filish/?app=quire](https://hgus107.github.io/Filish/?app=quire)
+
+Current release: **v0.1.0**
+
+Create, extract, and manage PDFs on your laptop. No uploads, page limits, or watermarks.
 
 ## Why this exists
 
 People paste tax returns, signed contracts, medical letters, and passports into free PDF websites every day, because they need a Word file turned into a PDF and that is where the search results point. The file is uploaded, converted on a server, and held there for some number of hours according to a privacy policy nobody reads.
 
-None of that is necessary. Every one of these conversions runs perfectly well on the machine already in front of you. The tools that do the work — Pandoc, LibreOffice, Ghostscript — are free, and older and better tested than any of the websites wrapping them.
+None of that is necessary. Quire runs these conversions locally through macOS PDFKit, qpdf, Tesseract, Pandoc, and LibreOffice.
 
 Quire is a plain interface over those tools, running locally, with nothing to sign up for.
 
 ## What it does
 
-- Word, ODT, RTF, Markdown, HTML, and plain text — converted between each other
-- Any of those to PDF, and PDF back out to text or Markdown
-- Merge, split, rotate, and compress PDFs
-- Batch mode — a folder of documents in one pass
-- Scanned PDFs get an OCR pass so the text is selectable and searchable
+- Converts Word, ODT, RTF, Markdown, HTML, and plain text into PDF
+- Creates a separate PDF for every source or one combined PDF in an order you choose
+- Extracts each PDF to Markdown, plain text, or both
+- Keeps headings, reading order, tables, captions, and figure references where the source allows it; image data is omitted from text exports
+- Merges, splits, rotates, and compresses PDFs
+- Converts multiple selected files or an entire folder in one pass
+- Makes scanned PDFs searchable and selectable with OCR
 
 ## What it avoids
 
@@ -31,40 +39,41 @@ Quire is a plain interface over those tools, running locally, with nothing to si
 
 ## How to use
 
-> Pre-release. There is no installer to download yet. This is the intended flow.
+Download the signed, notarized Apple Silicon installer from the [latest release](https://github.com/hgus107/quire/releases/latest).
 
-1. Drag documents onto the window.
-2. Pick what you want out — a format, or an operation like merge or compress.
-3. Choose where the results go.
-4. Press Convert.
+1. Choose a function and output type.
+2. Import files, or drag files or a folder onto the window.
+3. Reorder sources when creating one combined PDF.
+4. Press Convert, review the result status, then press Save.
 
 Originals are never modified or deleted.
 
 ## Tech stack
 
 **Shell**
+
 - [Tauri v2](https://tauri.app) — desktop shell, IPC bridge, installer bundler.
 - Frontend is Vite + TypeScript, no framework.
 
 **Backend**
+
 - [Rust](https://www.rust-lang.org) — orchestrates the conversion tools, manages the queue, and owns every path the user's files travel along.
-- [Pandoc](https://pandoc.org) — the document format graph. Handles docx, odt, rtf, markdown, html, latex, and plain text in every direction, through a single internal document model rather than a web of one-off converters.
-- [LibreOffice](https://www.libreoffice.org) in headless mode — used for the Office formats Pandoc renders imperfectly, and for anything to PDF where layout fidelity matters more than structure.
-- [Ghostscript](https://www.ghostscript.com) — PDF compression, merging, splitting, rotation, and page-range extraction. The same engine sitting behind most of the paid PDF sites.
-- [`pdfium`](https://pdfium.googlesource.com/pdfium/) — text extraction and page rendering for previews.
-- [`qpdf`](https://qpdf.sourceforge.io) — linearization, encryption removal on files you own, and structural repair of malformed PDFs.
+- [Pandoc](https://pandoc.org) — prepares Markdown documents for PDF conversion.
+- [LibreOffice](https://www.libreoffice.org) in headless mode — converts Office and text document formats to PDF.
+- macOS PDFKit, Core Graphics, and ImageIO — page counting, text extraction, OCR rendering, and three-level PDF compression without Poppler or Ghostscript.
+- [`qpdf`](https://qpdf.sourceforge.io) — merging, splitting, page-range extraction, and rotation.
 - [Tesseract](https://github.com/tesseract-ocr/tesseract) — OCR for scanned pages that carry no text layer.
-- [`tokio`](https://tokio.rs) — the task runtime. Unlike image conversion, this work is mostly waiting on external processes, so an async runtime fits better than a thread pool.
 - `serde` — typed messages across the Rust/TypeScript boundary.
 
 **How a conversion actually runs**
 
-Rust picks a route through the tools based on the input and requested output — a `.docx` to `.pdf` goes through LibreOffice, a `.docx` to `.md` goes through Pandoc, a compress goes straight to Ghostscript. Each step runs as a child process in a scratch directory that is wiped when the job ends. Nothing is passed over a network socket and no temporary file is written outside that directory. Per-file progress and errors come back to the webview as Tauri events, so one failed document does not take the batch with it.
+Rust picks a route based on the input and requested output: document conversion uses LibreOffice or Pandoc, structural PDF work uses qpdf, and native PDF processing uses Apple frameworks. Work is staged in Quire's scratch directory and nothing is passed over a network socket.
 
 **Distribution**
-- `tauri build` produces a signed `.dmg`, `.msi`, and `.AppImage`, with the required binaries bundled so there is no separate install step.
-- macOS builds are notarized.
-- Homebrew tap for `brew install --cask quire`.
+
+- `npm run package:mac` builds and verifies `Quire.app` plus an Apple Silicon `.dmg`, bundling qpdf, Tesseract, Pandoc, LibreOffice, OCR language data, and required native libraries.
+- Local packages use ad-hoc signing. A public release requires `QUIRE_SIGNING_IDENTITY` plus `QUIRE_NOTARY_PROFILE`; the script then enables hardened runtime signing, notarizes the DMG, and staples the ticket.
+- The current minimum is macOS 12 on Apple Silicon. Intel, Windows, and Linux packages are not currently built or verified by this repository.
 
 ## License
 
