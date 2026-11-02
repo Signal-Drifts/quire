@@ -2,7 +2,7 @@
 
 Everything PDF & Free.
 
-Website: [https://hgus107.github.io/YoFile/suite.html?app=quire](https://hgus107.github.io/YoFile/suite.html?app=quire)
+Website: [https://signal-drifts.github.io/YoFile/suite.html?app=quire](https://signal-drifts.github.io/YoFile/suite.html?app=quire)
 
 Current release: **v0.1.1**
 
@@ -39,7 +39,7 @@ Quire is a plain interface over those tools, running locally, with nothing to si
 
 ## How to use
 
-Download the signed, notarized Apple Silicon installer from the [latest release](https://github.com/hgus107/quire/releases/latest).
+Download the signed, notarized Apple Silicon installer from the [latest release](https://github.com/Signal-Drifts/quire/releases/latest).
 
 1. Choose a function and, when shown, an output type.
 2. Import files, or drag files or a folder onto the window.
